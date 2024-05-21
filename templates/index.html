@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Image</title>
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container mt-5">
+        <h1 class="text-center">Emotion detector</h1>
+        <h2 class="text-center">You can catch emotions in real time or upload a photo</h1>
+        <div class="mt-5 text-left">
+            <a href="/webcam" class="btn btn-secondary">Go to Webcam Capture</a>
+        </div>
+        <br>
+        <form action="/upload" method="post" enctype="multipart/form-data">
+            <div class="form-group">
+                <label for="file" class="form-check-label">Choose image</label>
+                <input type="file" class="form-control-file" id="file" name="file" required>
+            </div>
+            <button type="submit" class="btn btn-secondary">Upload</button>
+        </form>
+
+        {% if image_data %}
+            <div class="mt-5 text-center">
+                <h2>{{ caption }}</h2>
+                <img src="data:image/jpeg;base64,{{ image_data | b64encode }}" alt="Processed Image" class="img-fluid">
+            </div>
+        {% endif %}
+    </div>
+</body>
+</html>

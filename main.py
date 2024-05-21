@@ -1,139 +1,76 @@
-import os
-import numpy as np
-import matplotlib.pyplot as plt
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras.preprocessing.image import ImageDataGenerator, load_img
-from tensorflow.keras import layers, models
+from fastapi import FastAPI, File, UploadFile, Form, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
+from starlette.requests import Request
 import cv2
+import numpy as np
+import base64
 
-train_data_path = 'faces/train/'
-test_data_path = 'faces/test/'
+from model import guess_fer_emotion
 
-def print_dataset_info():
-    total = 0
-    for expression in os.listdir(train_data_path):
-        amount = len(os.listdir(train_data_path + expression))
-        print(expression, ' ', amount)
-        total += amount
-    print('total = ', total)
+app = FastAPI()
 
-def get_emotions_list():
-    emotions = []
-    for expression in os.listdir(train_data_path):
-        data = [expression]
-        emotions.append(data)
-    return emotions
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
-def show_images():
-    i = 0
-    plt.figure(figsize=(8, 8))
-    for expression in os.listdir(train_data_path):
-        image = load_img((train_data_path + expression) + '/' + os.listdir(train_data_path + expression)[0])
-        plt.subplot(1, 7, i + 1)
-        plt.imshow(image)
-        plt.title(expression)
-        plt.axis('off')
-        i += 1
-    plt.show()
+def b64encode(value: bytes) -> str:
+    return base64.b64encode(value).decode('utf-8')
 
-def train_model():
-    train_data_gen = ImageDataGenerator()
-    train_dataset = train_data_gen.flow_from_directory(
-            train_data_path, shuffle=True, target_size=(48, 48), color_mode='grayscale',
-            class_mode='categorical',
-            batch_size=128
-        )
-    
-    test_data_gen = ImageDataGenerator()
-    test_dataset = test_data_gen.flow_from_directory(
-            test_data_path, shuffle=False, target_size=(48, 48), color_mode='grayscale',
-            class_mode='categorical',
-            batch_size=128
-        )
-    
-    model = models.Sequential()
-    model.add(layers.Conv2D(64, (3,3), padding = 'same', activation='relu', input_shape=(48,48,1)))
-    model.add(layers.BatchNormalization())
-    model.add(layers.MaxPooling2D(pool_size=(2,2)))
-    model.add(layers.Dropout(0.25))
+templates.env.filters['b64encode'] = b64encode
 
-    model.add(layers.Conv2D(128, (5,5), padding = 'same', activation='relu'))
-    model.add(layers.BatchNormalization())
-    model.add(layers.MaxPooling2D(pool_size=(2,2)))
-    model.add(layers.Dropout(0.25))
+@app.get("/", response_class=HTMLResponse)
+async def read_root(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
-    model.add(layers.Conv2D(256, (3,3), padding = 'same', activation='relu'))
-    model.add(layers.BatchNormalization())
-    model.add(layers.MaxPooling2D(pool_size=(2,2)))
-    model.add(layers.Dropout(0.25))
+@app.post("/upload", response_class=HTMLResponse)
+async def upload_image(request: Request, file: UploadFile = File(...)):
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    model.add(layers.Conv2D(512, (3,3), padding = 'same', activation='relu'))
-    model.add(layers.BatchNormalization())
-    model.add(layers.MaxPooling2D(pool_size=(2,2)))
-    model.add(layers.Dropout(0.25))
+    _, buffer = cv2.imencode('.jpg', img)
+    processed_image = buffer.tobytes()
 
-    model.add(layers.Flatten())
+    caption = guess_fer_emotion(img)
 
-    model.add(layers.Dense(128))
-    model.add(layers.BatchNormalization())
-    model.add(layers.Activation('relu'))
-    model.add(layers.Dropout(0.25))
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "image_data": processed_image,
+        "caption": caption
+    })
 
-    model.add(layers.Dense(256))
-    model.add(layers.BatchNormalization())
-    model.add(layers.Activation('relu'))
-    model.add(layers.Dropout(0.25))
+@app.get("/webcam", response_class=HTMLResponse)
+async def webcam_page(request: Request):
+    return templates.TemplateResponse("webcam.html", {"request": request})
 
-    model.add(layers.Dense(7, activation='softmax'))
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-    model.fit(train_dataset, validation_data=test_dataset, epochs=50, batch_size=128, verbose=1)
-    model.save('model.keras')
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        i = 0
+        emotion = "can't understand emotion"
+        while True:
+            data = await websocket.receive_text()
+            image_data = base64.b64decode(data.split(",")[1])
+            np_arr = np.frombuffer(image_data, np.uint8)
+            image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-def show_video():
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-    cap = cv2.VideoCapture(0)
-    # model = tf.keras.models.load_model('models/model.keras')
-
-    i = 0
-    while True:
-        _, frame = cap.read()
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
-        
-        for (x, y, w, h) in faces:
+            if i == 7: # update emotion every 7 frames
+                emotion = guess_fer_emotion(image)
+                i = 0
+            
+            cv2.putText(image, emotion, (30, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            _, jpeg_image = cv2.imencode('.jpg', image)
+                
+            jpeg_base64 = base64.b64encode(jpeg_image).decode('utf-8')
+            jpeg_base64_str = f"data:image/jpeg;base64,{jpeg_base64}"
             i += 1
-            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 4)
-            # face_img = frame[y:y+h, x:x+w, 0]
-            emotion = guess_fer_emotion(frame)
-            cv2.putText(frame, emotion, (x, y+h+20), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        cv2.imshow('Face Detection', frame)
-        
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-def guess_emotion(model, img):
-    image = img
-    image = cv2.resize(image, (48,48))
-    image = np.invert(np.array([image]))
-    output = model.predict(image)
-    emotions = get_emotions_list()
-    return emotions[np.argmax(output)][0]
-
-## if my model works badly, use that
-def guess_fer_emotion(img):
-    from fer import FER
-    
-    emo_detector = FER(mtcnn=False)
-    dominant_emotion, _ = emo_detector.top_emotion(img)
-    return dominant_emotion
-
-def main():
-    show_video()
+            await websocket.send_text(jpeg_base64_str)
+    except WebSocketDisconnect:
+        print("WebSocket connection closed")
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
